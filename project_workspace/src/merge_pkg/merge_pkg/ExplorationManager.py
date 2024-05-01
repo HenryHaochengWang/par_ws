@@ -1,9 +1,10 @@
 import numpy as np
-import rclpy
 import math
 import time
 import subprocess
+import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Twist, Point, Pose, Vector3
 from std_msgs.msg import Bool, Header, ColorRGBA
 from sensor_msgs.msg import LaserScan
@@ -14,7 +15,6 @@ from find_object_2d.msg import ObjectsStamped
 from visualization_msgs.msg import Marker
 from builtin_interfaces.msg import Duration
 from threading import Lock
-
 
 # Global variables: markers
 markers = {
@@ -59,19 +59,22 @@ class ExplorationManager(Node):
         self.explore_lite_pub = self.create_publisher(Bool, 'explore/resume', 10)
         self.twist_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.hazard_pub = self.create_publisher(Marker, '/hazards', 10)
+        self.spin_pub = self.create_publisher(Bool, 'spin/resume', 10)
     
     def initial_flags(self):
         # Flags only change when start signal is received
         self.initial_spin_done = False
         self.explore_lite_launched = False
         self.robot_started = False
+        
         # Flags that change during exploration
         self.is_spinning = False
         self.is_exploring = False
+        self.spining_stop = False
         
         self.last_position = None
         self.total_distance = 0.0
-        self.distance_threshold = 0.35  # in meters
+        self.distance_threshold = 0.75  # in meters
         
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -123,13 +126,17 @@ class ExplorationManager(Node):
                     # stop explore lite
                     self.explore_lite_pub.publish(Bool(data=False))
                     self.update_state(exploring=False)
+                    # self.is_exploring = False
                     
                     # spin robot
                     self.spin_robot()
                     
                     # resume explore lite
-                    self.explore_lite_pub.publish(Bool(data=True))
+                    for i in range(10):
+                        self.explore_lite_pub.publish(Bool(data=True))
+                        time.sleep(0.1)
                     self.update_state(exploring=True)
+                    # self.is_exploring = True
                     
                 self.total_distance = 0.0
         self.last_position = current_position
@@ -153,6 +160,9 @@ class ExplorationManager(Node):
             
         if len(data) > 0 and self.object_availabile_to_mark(data[0]):
             self.get_logger().info('Object detected, marking object.')
+            # self.update_state(spinning=False)
+            self.is_spinning = False
+            self.get_logger().info(f'Robot state: exploring: {self.is_exploring}, spinning: {self.is_spinning}')
             
             # check if robot running other tasks
             if self.is_exploring and not self.is_spinning:
@@ -160,9 +170,11 @@ class ExplorationManager(Node):
                 self.get_logger().info('Pausing explore lite.')
                 self.explore_lite_pub.publish(Bool(data=False))
                 self.update_state(exploring=False)
+                # self.is_exploring = False
             elif self.is_spinning and not self.is_exploring:
                 self.get_logger().info('Pausing spin.')
-                self.update_state(spinning=False)
+                # self.update_state(spinning=False)
+                self.is_spinning = False
             
             obj = {
                 'id': data[0],
@@ -175,64 +187,64 @@ class ExplorationManager(Node):
             self.rotate_to_center_object(obj)
         
         else: 
-            if not self.is_exploring and not self.is_spinning and self.explore_lite_launched:
-                self.get_logger().info('Resuming explore lite.')
-                self.get_logger().info('Current object checked: {}'.format(self.object_checked))
-                self.explore_lite_pub.publish(Bool(data=True))
-                self.update_state(exploring=True)
-            elif not self.explore_lite_launched:
+            self.get_logger().info(f'Robot state: exploring: {self.is_exploring}, spinning: {self.is_spinning}')
+            if not self.explore_lite_launched:
                 self.get_logger().info('Explore lite not launched, launching explore lite.')
                 self.launch_explore_lite()
+            elif not self.is_exploring and not self.is_spinning and self.explore_lite_launched:
+                self.get_logger().info('Resuming explore lite.')
+                self.get_logger().info('Current object checked: {}'.format(self.object_checked))
+                for i in range(10):
+                    self.explore_lite_pub.publish(Bool(data=True))
+                    time.sleep(0.1)
+                self.update_state(exploring=True)
+                # self.is_exploring = True
             else:
                 self.get_logger().info('Object not avilable or already marked, ignoring.')
     
     
     # -------------------------------------------HELPER FUNCTIONS-------------------------------------------
     def spin_robot(self):
-        self.get_logger().info('Spinning robot.')
-        self.update_state(spinning=True)
-        self.timer = self.create_timer(0.5, self.rotate_once, 30)
-        # twist = Twist()
-        # twist.angular.z = 0.3
-        
-        # cycle = 0
-        # while cycle < 30 and self.is_spinning:
-        #     self.twist_pub.publish(twist)
-        #     time.sleep(0.5)
-        #     cycle += 1
-       
-        # twist.angular.z = 0.0
-        # self.twist_pub.publish(twist)
-        # self.update_state(spinning=False)
-    
-    def rotate_once(self):
-        if self.is_spinning:
+        if not self.spining_stop:
+            self.get_logger().info('Spinning robot.')
+            # self.update_state(spinning=True)
+            self.is_spinning = True
             twist = Twist()
             twist.angular.z = 0.3
-            self.twist_pub.publish(twist)
+            
+            try:
+                for i in range(150):
+                    if self.spining_stop:
+                        self.get_logger().info(f"Interrupting Spin at iteration {i}")
+                        break
+                    self.twist_pub.publish(twist)
+                    time.sleep(0.1) # IMPORTANT: DON'T REMOVE THIS LINE
+            finally:
+                self.get_logger().info('Spin finished or interrupted.')
+                # self.update_state(spinning=False)
+                self.is_spinning = False
         else:
-            self.timer.cancel()
-            twist = Twist()
-            twist.angular.z = 0.0
-            self.twist_pub.publish(twist)
-            self.update_state(spinning=False)
+            # self.update_state(spinning=False)
+            self.is_spinning = False
         
         
     def launch_explore_lite(self):
         self.get_logger().info("Launching Explore Lite")
         try:
-            process = subprocess.Popen(['ros2', 'launch', 'explore_lite', 'explore_lite.launch.py'])
+            process = subprocess.Popen(['ros2', 'launch', 'explore_lite', 'explore.launch.py'])
             self.get_logger().info("Explore Lite launched successfully, PID: {}".format(process.pid))
             self.explore_lite_launched = True
             self.update_state(exploring=True)
+            # self.is_exploring = True
         except Exception as e:
             self.get_logger().error("Failed to launch Explore Lite: {}".format(str(e)))
             self.explore_lite_launched = False
             self.update_state(exploring=False)
+            # self.is_exploring = False
             
     
     def object_availabile_to_mark(self, obj_id):
-        if obj_id in markers.keys() and obj_id not in self.object_checked:
+        if (obj_id in markers.keys()) and (obj_id not in self.object_checked):
             return True
         else:
             return False
@@ -325,25 +337,29 @@ class ExplorationManager(Node):
 
         for _marker in self.hazard_markers:
             self.hazard_pub.publish(_marker)
-
     
-    def update_state(self, exploring=None, spinning=None):
+
+    def update_state(self, spinning=None, exploring=None):
         with self.state_lock:
-            if exploring is not None:
-                self.is_exploring = exploring
             if spinning is not None:
                 self.is_spinning = spinning
-    # -------------------------------------------END OF CLASS-------------------------------------------
-# Main function
+            if exploring is not None:
+                self.is_exploring = exploring
+    # --------------------------------------------END OF CLASS---------------------------------------------
+
 def main(args=None):
     rclpy.init(args=args)
     exploration_manager = ExplorationManager()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(exploration_manager)
     try:
-        rclpy.spin(exploration_manager)
+        executor.spin()
     except KeyboardInterrupt:
         pass
-    exploration_manager.destroy_node()
-    rclpy.shutdown()
+    finally:
+        executor.shutdown()
+        exploration_manager.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

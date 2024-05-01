@@ -23,8 +23,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            f'start_check = {package_name}.start_check:main',
-            f'exploration = {package_name}.ExplorationManager:main'
+            f'marker_checker = {package_name}.MarkerChecker:main',
+            f'exploration_manager = {package_name}.ExplorationManager:main',
+            f'path_tracker = {package_name}.PathTracker:main',
+            f'back_to_init = {package_name}.BackToInit:main'
         ],
     },
 )
